@@ -6,3 +6,5 @@ requests
 pytesseract
 pillow
 pydantic
+easyocr
+numpy
