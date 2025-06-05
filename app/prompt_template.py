@@ -117,6 +117,7 @@ Your summary will be presented to vehicle valuers directly. Keep formatting neat
    - If no comparable listings are provided, rely on general market knowledge of resale values in Kenya/Uganda.
    - Use phrases like "estimated range" or "typical resale band" if exact data is unavailable.
    - Only skip the valuation if key data like make, model, and mileage are entirely missing.
+   - Consider force_sales_value as a reference but not the final value. Adjust based on external market trends in Kenya/Uganda.
 
 Please return your response in three bullet-pointed sections:
 1. LOGBOOK VERIFICATION NOTES

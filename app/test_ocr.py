@@ -1,13 +1,10 @@
-# test_ocr.py
-
 from PIL import Image
 import pytesseract
 import requests
 from io import BytesIO
 
-#test_image_url = "https://solvit-dev-us.s3.us-east-2.amazonaws.com/valuation//logBookImg1608366451.jpg"
-test_image_url = "https://www.pexels.com/photo/person-holding-photo-of-single-tree-at-daytime-1252983/"
-
+# A direct image URL for testing (a simple number plate image or document)
+test_image_url = "https://solvit-dev-us.s3.us-east-2.amazonaws.com/valuation//logBookImg17422798_final.png"
 
 try:
     print(f"Fetching image: {test_image_url}")

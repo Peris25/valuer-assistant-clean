@@ -50,7 +50,7 @@ async def generate_valuation_summary(request: ValuationRequest):
             override_data=request.override_data
         )
 
-        if not summary_text or summary_text.strip() == "":
+        if not summary_text or "⚠️" in summary_text:
             logger.warning("⚠️ Summary generation returned empty text.")
             raise HTTPException(
                 status_code=404,

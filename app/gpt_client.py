@@ -62,5 +62,5 @@ def generate_summary(report_id: str, override_data: dict = None) -> str:
     except Exception as e:
         print("Error generating GPT summary:", str(e))
         logger.info(f"Override: {override_data is not None}, Report ID: {report_id}")
-        logger.debug(f"Final vehicle data: {get_vehicle_data}")
+        #logger.debug(f"Final vehicle data: {get_vehicle_data}")
         return "⚠️ Failed to generate summary. Please try again or check logs."
