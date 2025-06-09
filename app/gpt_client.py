@@ -1,42 +1,37 @@
 # --- app/gpt_client.py ---
 
+import json
 import os
 import logging
 from openai import OpenAI
 from app.prompt_template import get_system_prompt, build_user_prompt
 from app.data_pipeline import get_vehicle_data
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Load from environment
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise EnvironmentError("Missing OPENAI_API_KEY in environment variables.")
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-
 def generate_summary(report_id: str, override_data: dict = None) -> str:
     """
     Generate a structured vehicle valuation summary using GPT-4.
-
-    Args:
-        report_id: Report ID to pull data for from the Swagger API.
-        override_data: Optional dictionary to bypass API and test prompt logic.
-
-    Returns:
-        GPT-generated summary or error message.
     """
     try:
         # Step 1: Get vehicle data (either override or real)
         data = override_data if override_data else get_vehicle_data(report_id)
-        #logger.info(f"Data: {data}")       
+        logger.info(f"Vehicle data used: {json.dumps(data, indent=2)}")
 
         if not data:
             return "⚠️ No data found for the report. Check if the report ID is valid."
 
         # Step 2: Prepare GPT prompts
         try:
-
             system_prompt = get_system_prompt()
             user_prompt = build_user_prompt(data)
             logger.debug("System and user prompts successfully built.")
@@ -57,10 +52,13 @@ def generate_summary(report_id: str, override_data: dict = None) -> str:
             max_tokens=800
         )
 
-        return response.choices[0].message.content.strip()
+        content = response.choices[0].message.content.strip()
+        logger.info(f"GPT raw content: {content!r}")
+        if not content:
+            logger.warning("⚠️ GPT returned an empty response.")
+        return content
 
     except Exception as e:
-        print("Error generating GPT summary:", str(e))
-        logger.info(f"Override: {override_data is not None}, Report ID: {report_id}")
-        #logger.debug(f"Final vehicle data: {get_vehicle_data}")
+        logger.exception("Error during GPT summary generation.")
+        logger.info(f"Report ID: {report_id}, Override: {override_data is not None}")
         return "⚠️ Failed to generate summary. Please try again or check logs."

@@ -25,10 +25,10 @@ Your primary output must be a professional summary with three clear sections:
 
 3. VALUATION NOTES
    - Ignore any valuation listed in the report.
-   - Always recommend a fair market value in KES — even a rough range — based on available data.
-   - Estimate using mileage, age (if available), condition, and vehicle make/model.
+   - Recommend a single, realistic fair market value in KES — not a range.
+   - Base it on mileage, age (if available), condition, and vehicle make/model.
+   - Use phrases like “Estimated value: KES 2,800,000” (not ranges).
    - If no comparable listings are provided, rely on general market knowledge of resale values in Kenya/Uganda.
-   - Use phrases like "estimated range" or "typical resale band" if exact data is unavailable.
    - Only skip the valuation if key data like make, model, and mileage are entirely missing.
 
 Output must:
@@ -36,19 +36,18 @@ Output must:
 - Use clear bullet points (each on its own line)
 - Use bold section headers (e.g., **LOGBOOK VERIFICATION NOTES**)
 - Maintain a professional, consistent tone
-- Include valuation as a KES range (e.g., “KES 3,000,000 to 3,500,000”) whenever enough context is available
+- Include valuation as a fixed KES value (e.g., “KES 3,000,000”) whenever enough context is available
 - Prompt a human valuer where clarity is needed
 """
 
 
 def format_list(items):
-    if not items:
+    if not items or not isinstance(items, list):
         return "Not available"
     return "\n  - " + "\n  - ".join(str(i) for i in items)
 
 
 def build_user_prompt(data):
-    # Skip OCR if missing
     chassis_ocr = data.get('chassis_number_ocr')
     engine_ocr = data.get('engine_number_ocr')
 
@@ -78,23 +77,19 @@ Below is structured inspection data for a used vehicle. Review it and return a c
 - Condition Notes: {data.get('condition_notes') or 'Not available'}
 - Comparable Market Listings:
   {format_list(data.get('market_data'))}
+- Forced Sale Value (if available): {data.get('force_sales_value') or 'Not available'}
 
-Please use this format style for your response:
+
+Please return your response with each section clearly labeled in bold, followed by bullet points:
 
 **LOGBOOK VERIFICATION NOTES**
 - [first point]
-- [second point]
 
 **GLOBAL INFORMATION NOTES**
 - [first point]
-- [second point]
 
 **VALUATION NOTES**
-- [first point]
-- [estimated value range]
-- [closing human input suggestion if needed]
-
-Your summary will be presented to vehicle valuers directly. Keep formatting neat and uniform. Use line breaks after every bullet for clarity.
+- [single value estimate in KES, no ranges]
 
 
 === INSTRUCTIONS ===
@@ -112,15 +107,12 @@ Your summary will be presented to vehicle valuers directly. Keep formatting neat
 
 3. In **VALUATION NOTES**:
    - Ignore any valuation listed in the report.
-   - Always recommend a fair market value in KES — even a rough range — based on available data.
-   - Estimate using mileage, age (if available), condition, and vehicle make/model.
-   - If no comparable listings are provided, rely on general market knowledge of resale values in Kenya/Uganda.
-   - Use phrases like "estimated range" or "typical resale band" if exact data is unavailable.
-   - Only skip the valuation if key data like make, model, and mileage are entirely missing.
-   - Consider force_sales_value as a reference but not the final value. Adjust based on external market trends in Kenya/Uganda.
+   - Recommend a single, realistic fair market value in KES — not a range.
+   - Use phrases like “Estimated value: KES 3,000,000”.
+   - Estimate based on mileage, condition, make/model, and age.
+   - If market listings are provided, consider them. If not, use general market knowledge.
+   - Consider forced sale value as a reference only — adjust based on overall condition and market trends.
+   - Only skip this section if both make/model and mileage are missing.
 
-Please return your response in three bullet-pointed sections:
-1. LOGBOOK VERIFICATION NOTES
-2. GLOBAL INFORMATION NOTES
-3. VALUATION NOTES
+Your summary will be presented directly to human vehicle valuers. Keep formatting neat and uniform, and avoid value ranges.
 """
