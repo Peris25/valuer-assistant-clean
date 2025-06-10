@@ -3,8 +3,8 @@ fastapi
 uvicorn
 python-dotenv
 requests
-pytesseract
+#pytesseract
 pillow
 pydantic
-easyocr
+#easyocr
 numpy
