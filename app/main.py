@@ -43,9 +43,9 @@ class ValuationRequest(BaseModel):
 class ValuationResponse(BaseModel):
     summary: str
 
-@app.get("/health", tags=["Monitoring"])
-async def health_check():
-    return {"status": "ok"}
+#@app.get("/health", tags=["Monitoring"])
+#async def health_check():
+#    return {"status": "ok"}
 
 @app.post("/generate-valuation-summary", response_model=ValuationResponse, tags=["Valuation"])
 async def generate_valuation_summary(request: ValuationRequest):
