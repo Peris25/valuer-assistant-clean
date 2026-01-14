@@ -5,7 +5,9 @@ python-dotenv
 requests
 pillow
 pydantic
-numpy
 pandas
 httpx
 beautifulsoup4
+numpy
+streamlit
+openpyxl
