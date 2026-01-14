@@ -3,8 +3,9 @@ fastapi
 uvicorn
 python-dotenv
 requests
-#pytesseract
 pillow
 pydantic
-#easyocr
 numpy
+pandas
+httpx
+beautifulsoup4
