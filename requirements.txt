@@ -1,4 +1,4 @@
-openai
+openai>=1.30.0,<2
 fastapi
 uvicorn
 python-dotenv
@@ -11,3 +11,4 @@ beautifulsoup4
 numpy
 streamlit
 openpyxl
+lxml
