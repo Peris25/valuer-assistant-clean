@@ -108,40 +108,15 @@ def safe_val(val):
 
 def build_user_prompt(data):
     """
-    Builds a user-facing prompt for GPT-4 valuation.
-    Prompts only for missing base price, duty, profit margin, or face-value inputs.
+    Production-safe: builds the user-facing prompt WITHOUT input().
+    The Streamlit UI supplies required fields via override_data.
 
-    Adds ONE universal demand adjustment prompt (all vehicles) AFTER a value basis exists:
+    Demand adjustment is universal (all vehicles) and applied AFTER a value basis exists:
       - Face-value cases (manufacture age >= 14): basis = face_value_average + aftermarket_additions
       - Non-face-value cases (< 14): basis priority:
           (1) final_depreciated_value if available
           (2) else base_price * (retention_percent_used/100) if both available
     """
-
-    def prompt_demand_level_and_percent():
-        level = input(
-            "What is the market demand level of this vehicle? (low/high/very high): "
-        ).strip().lower()
-
-        if level not in ["low", "high", "very high"]:
-            level = "low"
-
-        pct = 0.0
-        if level in ["high", "very high"]:
-            while True:
-                try:
-                    raw = input(
-                        "Enter the demand adjustment percentage (e.g., 5 for 5%): "
-                    ).strip()
-                    pct = float(raw) if raw else 0.0
-                    break
-                except ValueError:
-                    print("Please enter a valid numeric percent (e.g., 5, 7.5, 10).")
-
-        return level, pct
-
-    def apply_percent_adjustment(value, pct):
-        return value + (value * (pct / 100.0))
 
     def to_float_or_none(x):
         try:
@@ -150,6 +125,9 @@ def build_user_prompt(data):
             return float(x)
         except Exception:
             return None
+
+    def apply_percent_adjustment(value, pct):
+        return value + (value * (pct / 100.0))
 
     origin_type = (data.get("origin_type") or "").lower()
     reg_date = data.get("registration_date")
@@ -165,137 +143,55 @@ def build_user_prompt(data):
         except Exception:
             manufacture_age_years = 0
 
-    # --- Prompt for base price ---
-    if origin_type == "local":
-        # Skip base-price prompt for face-value cases (manufacture age ≥ 14)
-        if manufacture_age_years < 14:
-            if not data.get("base_price"):
-                data["base_price"] = float(
-                    input(
-                        f"Enter the BASE PRICE (KES) for the local {data.get('vehicle_make','')} {data.get('vehicle_model','')}: "
-                    ) or 0
-                )
+    # --- Universal demand inputs (supplied by UI) ---
+    demand_level = (data.get("demand_level") or "low").strip().lower()
+    if demand_level not in ["low", "high", "very high"]:
+        demand_level = "low"
 
-    elif origin_type == "imported":
-        # Only prompt for C&F base price when this is NOT a face-value case
-        if manufacture_age_years < 14:
-            # 0–7 years from REGISTRATION → CNF in USD
-            if age_years_reg <= 7:
-                if not data.get("base_price"):
-                    data["base_price"] = float(
-                        input(
-                            f"Enter the C$F price (USD) for the imported {data.get('vehicle_make','')} {data.get('vehicle_model','')}: "
-                        ) or 0
-                    )
-            # 8–14 years from REGISTRATION → CNF in KES
-            elif 7 < age_years_reg <= 14:
-                if not data.get("base_price"):
-                    data["base_price"] = float(
-                        input(
-                            f"Enter the C$F price (KES) at the time of import for {data.get('vehicle_make','')} {data.get('vehicle_model','')}: "
-                        ) or 0
-                    )
+    demand_adjust_percent = to_float_or_none(data.get("demand_adjust_percent"))
+    if demand_adjust_percent is None:
+        demand_adjust_percent = 0.0
 
-    # --- Prompt for duty/profit margin if imported ---
-    if origin_type == "imported" and manufacture_age_years < 14:
-        if data.get("duty") is None:
-            while True:
-                try:
-                    duty_input = input(
-                        f"Enter the KRA import duty (KES) for this imported {data.get('vehicle_make','')} {data.get('vehicle_model','')}: "
-                    )
-                    data["duty"] = float(duty_input) if duty_input.strip() else 0.0
-                    break
-                except ValueError:
-                    print("Please enter a valid numeric duty amount.")
+    # Force 0% when low demand
+    if demand_level == "low":
+        demand_adjust_percent = 0.0
 
-        if data.get("profit_margin") is None:
-            while True:
-                try:
-                    pm_input = input(
-                        f"Enter the profit margin (as a decimal, default 0.10 for 10%) for this imported {data.get('vehicle_make','')} {data.get('vehicle_model','')}: "
-                    )
-                    data["profit_margin"] = float(pm_input) if pm_input.strip() else 0.10
-                    break
-                except ValueError:
-                    print("Please enter a valid decimal value (e.g., 0.10 for 10%).")
+    data["demand_level"] = demand_level
+    data["demand_adjust_percent"] = demand_adjust_percent
+    data["high_demand"] = demand_level in ["high", "very high"]  # backwards compat
 
-    # --- Face-value inputs (ONLY to compute the basis for >=14 yrs) ---
-    if manufacture_age_years >= 14:
-        data["face_value_average"] = float(
-            input(
-                f"Enter the average market value from 3 comparable vehicles for {data.get('vehicle_make','')} {data.get('vehicle_model','')}: "
-            ) or 0
-        )
-        data["aftermarket_additions"] = float(
-            input("Enter value of any significant aftermarket additions (KES, 0 if none): ")
-            or 0
-        )
-    else:
-        data["face_value_average"] = 0.0
-        data["aftermarket_additions"] = 0.0
-
-    # --- Universal demand adjustment (ALL vehicles) ---
+    # --- Determine basis value BEFORE demand adjustment ---
     value_before_demand = None
     basis_label = None
 
     if manufacture_age_years >= 14:
-        value_before_demand = float(data.get("face_value_average", 0.0)) + float(
-            data.get("aftermarket_additions", 0.0)
-        )
-        basis_label = "face-value base amount (Face Value Average + Aftermarket Additions)"
+        fva = to_float_or_none(data.get("face_value_average")) or 0.0
+        ama = to_float_or_none(data.get("aftermarket_additions")) or 0.0
+        value_before_demand = fva + ama
+        basis_label = "Face Value Average + Aftermarket Additions"
     else:
         # Priority 1: final_depreciated_value if already computed upstream
         fdv = to_float_or_none(data.get("final_depreciated_value"))
         if fdv is not None and fdv > 0:
             value_before_demand = fdv
-            basis_label = "final depreciated value"
+            basis_label = "Final Depreciated Value"
         else:
-            # Priority 2 (IMPORTANT FIX): compute basis from base_price + retention_percent_used
+            # Priority 2: base_price × (retention_percent_used ÷ 100)
             bp = to_float_or_none(data.get("base_price"))
             ret = to_float_or_none(data.get("retention_percent_used"))
             if bp is not None and bp > 0 and ret is not None and ret > 0:
                 value_before_demand = bp * (ret / 100.0)
-                basis_label = "base_price × (retention_percent_used ÷ 100)"
+                basis_label = "Base Price × (Retention Used ÷ 100)"
 
     if value_before_demand is not None:
-        level, pct = prompt_demand_level_and_percent()
-        data["demand_level"] = level
-        data["demand_adjust_percent"] = pct
-        data["high_demand"] = level in ["high", "very high"]  # backwards compatibility
-
         data["value_before_demand"] = round(value_before_demand, 2)
         data["value_after_demand"] = round(
-            apply_percent_adjustment(value_before_demand, pct), 2
+            apply_percent_adjustment(value_before_demand, demand_adjust_percent), 2
         )
     else:
-        data["demand_level"] = "low"
-        data["demand_adjust_percent"] = 0.0
-        data["high_demand"] = False
         data["value_before_demand"] = "Not available"
         data["value_after_demand"] = "Not available"
-        basis_label = "Not available (need final_depreciated_value or base_price + retention_percent_used)"
-
-    # --- Display Confirmation ---
-    print("\n✅ Confirmed Inputs:")
-    print(
-        f" Base Price: {data.get('base_price')} "
-        f"{'USD' if origin_type == 'imported' and age_years_reg <= 7 else 'KES'}"
-    )
-    if manufacture_age_years >= 14:
-        print(f"   Face Value Average: {data.get('face_value_average')} KES")
-        print(f"   Aftermarket Additions: {data.get('aftermarket_additions')} KES")
-    if origin_type == "imported" and manufacture_age_years < 14:
-        print(f"   Duty: {data.get('duty', 0)} KES")
-        print(f"   Profit Margin: {float(data.get('profit_margin',0.10))*100}%")
-    print(f"   Demand Level: {data.get('demand_level')}")
-    print(f"   Demand Adjustment: {data.get('demand_adjust_percent')}%")
-    print(f"   Demand Basis: {basis_label}")
-    print(f"   Value Before Demand: {data.get('value_before_demand')}")
-    print(f"   Value After Demand: {data.get('value_after_demand')}")
-    print(f"   Registration Date: {data.get('registration_date', 'Not available')}")
-    print(f"   Production Year: {data.get('production_year', 'Not available')}")
-    print(f"   Mileage: {data.get('mileage', 'Not available')}")
+        basis_label = "Not available (missing basis inputs)"
 
     # --- Compute age since registration for display ---
     if reg_date:
@@ -342,10 +238,14 @@ Below is structured inspection data for a used vehicle. Review it and return a c
 - Profit Margin: {data.get('profit_margin', '0.10')}
 - Face Value Average (if applicable): {data.get('face_value_average', 'Not available')} KES
 - Aftermarket Additions (if applicable): {data.get('aftermarket_additions', 'Not available')} KES
-- Demand Level (universal): {data.get('demand_level', 'low')}
-- Demand Adjustment Percent (applied to computed value): {data.get('demand_adjust_percent', 0)}
+
+=== DEMAND ADJUSTMENT (UNIVERSAL) ===
+- Demand Level: {data.get('demand_level', 'low')}
+- Demand Adjustment Percent: {data.get('demand_adjust_percent', 0)}
+- Demand Basis Used: {basis_label}
 - Value Before Demand Adjustment: {data.get('value_before_demand', 'Not available')}
 - Value After Demand Adjustment: {data.get('value_after_demand', 'Not available')}
+
 - Decoded Features:
   {format_list(data.get('decoded_features'))}
 - Known Issues: {data.get('known_issues') or 'Not available'}

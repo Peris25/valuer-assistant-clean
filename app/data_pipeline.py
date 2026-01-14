@@ -35,8 +35,10 @@ client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 _fx_cache = {"rates": None, "timestamp": None}
 
 #load sources
-GRAPH_METHOD_PATH = "/mnt/data/graph_method.xlsx"
-ECONOMIC_LIFE_PATH = "/mnt/data/economic_life_chart.xlsx"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+GRAPH_METHOD_PATH = os.path.join(BASE_DIR, "data", "graph_method.xlsx")
+ECONOMIC_LIFE_PATH = os.path.join(BASE_DIR, "data", "economic_life_chart.xlsx")
 
 try:
     graph_df = pd.read_excel(GRAPH_METHOD_PATH)
@@ -238,45 +240,21 @@ def get_age_from_production_year(prod_year: int) -> int:
     except (TypeError, ValueError):
         return 0
 
-"""def apply_graph_method(base_price: float, mileage: float, age_months: int) -> float:
-    
-    if graph_df is None or graph_df.empty:
-        return base_price
 
-    # Pick the nearest combination by absolute difference
-    row = graph_df.iloc[((graph_df["AgeMonths"] - age_months).abs() +
-                         (graph_df["Mileage"] - mileage).abs()).argsort()[:1]]
-
-    retention_percent = float(row["DepreciationPercent"].values[0])  # this is now retention %
-    return round(base_price * (retention_percent / 100.0), 2)
-
-def apply_economic_life(base_price: float, age_years: int) -> float:
-    if econ_df is None or econ_df.empty:
-        return base_price
-    row = econ_df.iloc[(econ_df["AgeYears"] - age_years).abs().argsort()[:1]]
-    dep_percent = row["DepreciationPercent"].values[0]
-    return round(base_price * (1 - dep_percent / 100), 2)
-
-def calculate_local_value(report: Dict[str, Any], base_price: float, mileage: float, reg_date: str) -> float:
-    reg_date = report.get("registration_date", "")
-    age_months = get_age_months(reg_date)
-    if age_months < 36:
-        return apply_graph_method(base_price, mileage, age_months)
-    else:
-        age_years = age_months // 12
-        return apply_economic_life(base_price, age_years)
-"""
-
-def apply_graph_method(base_price: float, mileage: float, age_months: int) -> float:
+def apply_graph_method(base_price: float, mileage: float, age_months: int, usage_type: str = "private") -> float:
     """
     Apply Graph Method. Match mileage and age independently to nearest rows
     and average their retention percentages.
+
+    PRODUCTION-SAFE:
+    - No input()
+    - usage_type must be supplied upstream (Streamlit/override_data), default "private"
     """
     if graph_df is None or graph_df.empty:
         logger.warning("Graph method table is missing or empty.")
         return base_price
 
-    # Make sure incoming values are numeric
+    # Ensure numeric
     try:
         mileage = float(mileage or 0)
         age_months = int(age_months or 0)
@@ -284,60 +262,42 @@ def apply_graph_method(base_price: float, mileage: float, age_months: int) -> fl
         mileage = 0.0
         age_months = 0
 
-    usage_label = "not-asked"
+    usage_type = (usage_type or "private").strip().lower()
+    if usage_type not in ["private", "commercial"]:
+        usage_type = "private"
+
+    usage_label = "≤15k-band"
     max_mileage_threshold = 10000.0
 
+    # Your old logic: only needed when mileage > 10,000
     if mileage > 10000:
-        # Only now do we need to know private vs commercial
-        try:
-            usage_raw = input(
-                "Mileage is above 15,000 km. Is the vehicle used for private or commercial purposes? (private/commercial): "
-            ).strip().lower()
-            if usage_raw == "commercial":
-                usage_label = "commercial"
-                max_mileage_threshold = 20000.0
-            else:
-                # Treat anything else as private in terms of cap
-                usage_label = "private"
-                max_mileage_threshold = 10000.0
-        except Exception:
-            # If input fails, fall back to private cap (15k)
-            usage_label = "private"
-            max_mileage_threshold = 10000.0
-    else:
-        # ≤15k: we don't care about usage, behaviour is the same for both.
-        usage_label = "≤15k-band"
-        max_mileage_threshold = 10000.0
+        usage_label = usage_type
+        max_mileage_threshold = 20000.0 if usage_type == "commercial" else 10000.0
 
-    # Nearest age row (returns a Series)
+    # Nearest age row
     age_idx = (graph_df["AgeMonths"] - age_months).abs().argsort().iat[0]
     age_row = graph_df.iloc[age_idx]
     age_retention = float(age_row["AgeDepreciation"])
 
-    # Nearest mileage row (returns a Series)
+    # Nearest mileage row
     mileage_idx = (graph_df["Mileage"] - mileage).abs().argsort().iat[0]
     mileage_row = graph_df.iloc[mileage_idx]
     mileage_retention = float(mileage_row["MileageDepreciation"])
 
     if mileage > max_mileage_threshold:
-        # High mileage above cap → ignore mileage band, use age-only
         avg_retention = age_retention
         logger.info(
             f"Graph Method (usage={usage_label}) | Mileage {mileage} km > cap {max_mileage_threshold} km; "
             f"using age-only retention {age_retention}%."
         )
     else:
-        # Under or equal to cap → average age + mileage
         avg_retention = (mileage_retention + age_retention) / 2.0
         logger.info(
             f"Graph Method (usage={usage_label}) | Age: {age_months} months | Mileage: {mileage} km | "
-            f"Age Ret%: {age_retention}% | Mileage Ret%: {mileage_retention}% | "
-            f"Avg Ret%: {avg_retention}% | "
-            f"MatchedRows -> AgeMonths={int(age_row['AgeMonths'])}, Mileage={int(mileage_row['Mileage'])}"
+            f"Age Ret%: {age_retention}% | Mileage Ret%: {mileage_retention}% | Avg Ret%: {avg_retention}%"
         )
 
     return round(base_price * (avg_retention / 100.0), 2)
-
 
 def apply_economic_life(base_price: float, reg_date: str) -> float:
     """
@@ -373,7 +333,8 @@ def calculate_local_value(report: Dict[str, Any], base_price: float, mileage: fl
 
     # <3 years → Graph Method
     if age_months < 36:
-        return apply_graph_method(base_price, mileage, age_months)
+        usage_type = (report.get("usage_type") or "private")
+        return apply_graph_method(base_price, mileage, age_months, usage_type=usage_type)
     # ≥3 years → Economic Life
     return apply_economic_life(base_price, reg_date)
 
