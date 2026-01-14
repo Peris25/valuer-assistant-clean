@@ -65,8 +65,8 @@ async def generate_valuation_summary(request: ValuationRequest):
         duration = round(time.time() - start_time, 2)
         logger.info(f"✅ GPT summary generated in {duration}s.")
 
-        if not summary_text or "⚠️" in summary_text:
-            logger.warning("⚠️ Summary generation returned empty or invalid text.")
+        if not summary_text:
+            logger.warning("⚠️ Summary generation returned empty text.")
             raise HTTPException(status_code=404, detail="No summary generated. Check input data.")
 
         return ValuationResponse(summary=summary_text)
@@ -77,9 +77,4 @@ async def generate_valuation_summary(request: ValuationRequest):
         logger.error("❌ GPT summary generation failed", exc_info=e)
         raise HTTPException(status_code=500, detail="Failed to generate summary. Check logs.")
 
-# Ensure it works on Render (which sets the PORT env var)
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    logger.info(f"🚀 Starting app on port {port}")
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
+

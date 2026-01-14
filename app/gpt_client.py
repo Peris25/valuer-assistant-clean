@@ -4,8 +4,8 @@ import json
 import os
 import logging
 from openai import OpenAI
-from app.prompt_template import get_system_prompt, build_user_prompt
-from app.data_pipeline import get_vehicle_data
+from app.prompt_template import get_system_prompt, build_user_prompt 
+from app.data_pipeline import get_vehicle_data, convert_to_kes, get_fx_rates
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,37 +21,44 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 def generate_summary(report_id: str, override_data: dict = None) -> str:
     """
     Generate a structured vehicle valuation summary using GPT-4.
+    Prompts valuers for base price/duty manually if missing.
     """
     try:
-        # Step 1: Get vehicle data (either override or real)
+        # Step 1: Fetch vehicle data (either override or from API)
         data = override_data if override_data else get_vehicle_data(report_id)
-        logger.info(f"Vehicle data used: {json.dumps(data, indent=2)}")
-
         if not data:
-            return "⚠️ No data found for the report. Check if the report ID is valid."
+            return "⚠️ No data found for this report."
+        
+        
+        fx_rate = get_fx_rates().get("KES", 129.0)
+        data["fx_rate_kes"] = fx_rate
+        data["fx_rate_note"] = f"For all currency conversions, use the current live rate of 1 USD = {fx_rate:.2f} KES (auto-fetched)."
 
-        # Step 2: Prepare GPT prompts
-        try:
-            system_prompt = get_system_prompt()
-            user_prompt = build_user_prompt(data)
-            logger.debug("System and user prompts successfully built.")
-        except Exception as e:
-            logger.exception("Error building prompts from vehicle data.")
-            return "⚠️ Failed to build summary prompts. Please check the input data format."
+        # Step 2: Prompt valuer for missing inputs (manual input)
+        logger.info("🔧 Checking for manual base price/duty/profit margin inputs...")
+        user_prompt = build_user_prompt(data)  # <- This both gathers input and returns formatted text
 
+        # Step 3: Prepare GPT prompts
+        system_prompt = (
+            get_system_prompt() 
+        + f"\n\nIMPORTANT: Always use the provided live FX rate (1 USD = {fx_rate:.2f} KES). "
+              "Do NOT invent or assume other rates."
+        )
+        
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
 
-        # Step 3: Call GPT-4
+        # Step 4: Call GPT-4
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o",
             messages=messages,
             temperature=0.2,
             max_tokens=800
         )
 
+        # Step 5: Extract and log content
         content = response.choices[0].message.content.strip()
         logger.info(f"GPT raw content: {content!r}")
         if not content:
