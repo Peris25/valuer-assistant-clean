@@ -129,23 +129,129 @@ def fetch_report_data(report_id: str, token: str) -> Dict[str, Any]:
         logger.error(f"❌ Failed to fetch report {report_id}", exc_info=e)
         return {}
 
-
+# ================== OCR: Image Preprocessing & Quality Scoring ==================
 
 def fuzzy_match(a: str, b: str) -> int:
     return round(SequenceMatcher(None, a, b).ratio() * 10)
 
+def normalize_id(value: str) -> str:
+    if not value:
+        return ""
+    value = value.upper().strip()
+    value = value.replace("\\", "/")
+    value = re.sub(r"\s+", "", value)
+    return re.sub(r"[^A-Z0-9\-\/]", "", value)
+
+def _to_grayscale(img: Image.Image) -> Image.Image:
+    return img.convert("L")
+
+def _crop_timestamp_band(img: Image.Image, crop_ratio: float = 0.16) -> Image.Image:
+    """
+    Many of your images have red timestamp/coords on the bottom.
+    Crop a small band off the bottom to reduce OCR noise.
+    """
+    w, h = img.size
+    crop_h = int(h * crop_ratio)
+    if crop_h <= 0 or crop_h >= h:
+        return img
+    return img.crop((0, 0, w, h - crop_h))
+
+def _simple_contrast(img: Image.Image) -> Image.Image:
+    """
+    Lightweight contrast boost without extra deps.
+    """
+    arr = np.array(img).astype(np.float32)
+    # Stretch contrast
+    p2, p98 = np.percentile(arr, (2, 98))
+    if p98 <= p2:
+        return img
+    arr = (arr - p2) * (255.0 / (p98 - p2))
+    arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+def preprocess_for_ocr(img: Image.Image) -> Image.Image:
+    """
+    Minimal preprocessing:
+    - crop timestamp band
+    - grayscale
+    - contrast stretch
+    """
+    img2 = _crop_timestamp_band(img, crop_ratio=0.16)
+    img2 = _to_grayscale(img2)
+    img2 = _simple_contrast(img2)
+    return img2
+
+def estimate_image_quality(img: Image.Image) -> int:
+    """
+    Returns 0–10. Penalizes:
+    - heavy compression/noise (high pixel variance in small areas)
+    - low contrast (flat images)
+    - watermark-heavy (often lowers contrast / adds patterns)
+    NOTE: This is heuristic but far better than always "9/10".
+    """
+    try:
+        g = _to_grayscale(img)
+        arr = np.array(g).astype(np.float32)
+
+        # Contrast score (std dev)
+        contrast = float(arr.std())  # higher = better
+        # Noise proxy: mean absolute difference between neighboring pixels
+        # (higher can mean edges, but watermark + grain also increases it)
+        dx = np.abs(arr[:, 1:] - arr[:, :-1]).mean() if arr.shape[1] > 1 else 0.0
+        dy = np.abs(arr[1:, :] - arr[:-1, :]).mean() if arr.shape[0] > 1 else 0.0
+        noise = float((dx + dy) / 2.0)
+
+        # Base score from contrast
+        # Typical contrast range: ~10–60 on these images
+        score = 2
+        if contrast > 15: score = 4
+        if contrast > 25: score = 6
+        if contrast > 35: score = 7
+        if contrast > 45: score = 8
+
+        # Penalize likely watermark/noise patterns
+        if noise > 18: score -= 1
+        if noise > 25: score -= 2
+        if noise > 32: score -= 3
+
+        return int(max(0, min(10, score)))
+    except Exception:
+        return 5
+
+
+# ================== OCR: GPT Vision Extraction ==================
 
 def perform_ocr_gpt_vision(image: Image.Image, label: str) -> str:
+    """
+    Label-specific extraction:
+      - chassis: expects mixed alphanumerics + dashes/slashes
+      - engine: may include letters prefix + digits (e.g., LEB6944871 / 2ZR-...)
+    """
     try:
         buffered = BytesIO()
         image.save(buffered, format="PNG")
         b64_img = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
+        label = (label or "").strip().lower()
+        if label == "engine":
+            instruction = (
+                "Extract the ENGINE NUMBER from the image. "
+                "It may include letters and numbers and may have prefixes. "
+                "Return ONLY the engine number with no extra text."
+            )
+        else:
+            # default chassis
+            instruction = (
+                "Extract the CHASSIS NUMBER from the image. "
+                "It may include letters, numbers, dashes or slashes. "
+                "Return ONLY the chassis number with no extra text."
+            )
+
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Extract the {label} number from this image. Return only the number."},
+                    {"type": "text", "text": instruction},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}}
                 ]
             }
@@ -157,47 +263,111 @@ def perform_ocr_gpt_vision(image: Image.Image, label: str) -> str:
             max_tokens=50,
         )
 
-        return re.sub(r"[^A-Z0-9\-]", "", response.choices[0].message.content.strip().upper())
+        return normalize_id(response.choices[0].message.content)
 
     except Exception as e:
         logger.warning(f"GPT Vision OCR failed for {label}", exc_info=e)
         return ""
 
-def perform_ocr_on_image(image_url: Optional[str], token: str, label: str = "chassis") -> Dict[str, Any]:
+# ================== OCR: Orchestration (Fetch -> Preprocess -> OCR -> Score) ==================
+
+def perform_ocr_on_image(
+    image_url: Optional[str],
+    token: str,
+    label: str = "chassis",
+    expected: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Returns:
+      - text: OCR output
+      - confidence: 0–10 FINAL confidence (penalizes mismatch + poor quality)
+      - image_quality: 0–10 heuristic quality score (noise/watermark/timestamp penalized)
+      - match_score: 0–10 fuzzy score vs expected (if provided)
+    """
     if not image_url:
         logger.warning(f"No {label} image URL provided.")
-        return {"text": "", "confidence": 0}
+        return {"text": "", "confidence": 0, "image_quality": 0, "match_score": 0}
+
     try:
         logger.info(f"Fetching {label} image from: {image_url}")
-        #headers = {"Authorization": f"Bearer {token}"}
         resp = httpx.get(image_url, timeout=10)
         if resp.status_code != 200:
             logger.error(f"❌ {label.title()} image fetch failed with {resp.status_code}: {image_url}")
-            return {"text": "", "confidence": 0}
-        img = Image.open(BytesIO(resp.content))
+            return {"text": "", "confidence": 0, "image_quality": 0, "match_score": 0}
+
+        raw_img = Image.open(BytesIO(resp.content))
+        image_quality = estimate_image_quality(raw_img)
+
+        img = preprocess_for_ocr(raw_img)
 
         text = perform_ocr_gpt_vision(img, label)
-        score = 10 if text else 0
 
-        logger.info(f"{label.title()} OCR - GPT Vision with confidence {score}/10")
-        return {"text": text, "confidence": score}
+        # base confidence from format/shape
+        base_conf = ocr_confidence(text, label)
+
+        # mismatch penalty if expected exists
+        match_score = 0
+        if expected:
+            match_score = fuzzy_match(normalize_id(expected), normalize_id(text))
+
+        # FINAL confidence logic:
+        # - never allow high confidence when mismatch is strong
+        # - also cap by image quality
+        confidence = base_conf
+
+        # Cap by image quality (bad images should not show 9/10)
+        confidence = min(confidence, max(1, image_quality))
+
+        # Penalize mismatch hard
+        if expected:
+            if match_score == 10:
+                confidence = min(10, confidence)
+            elif match_score >= 8:
+                confidence = min(confidence, 7)  # close but not exact
+            elif match_score >= 6:
+                confidence = min(confidence, 4)
+            else:
+                confidence = min(confidence, 2)
+
+        logger.info(
+            f"{label.title()} OCR | text='{text}' | base={base_conf}/10 | "
+            f"imgQ={image_quality}/10 | match={match_score}/10 | final={confidence}/10"
+        )
+
+        return {
+            "text": text,
+            "confidence": int(confidence),
+            "image_quality": int(image_quality),
+            "match_score": int(match_score),
+        }
+
     except Exception as e:
         logger.error(f"OCR failed for {label} image: {image_url}", exc_info=e)
-        return {"text": "", "confidence": 0}
+        return {"text": "", "confidence": 0, "image_quality": 0, "match_score": 0}
 
+def ocr_confidence(text: str, kind: str) -> int:
+    if not text:
+        return 0
 
-def try_multiple_ocr_sources(images: List[Optional[str]], token: str, expected: str, label: str) -> tuple[str, int]:
-    """
-    Tries multiple image URLs for OCR and picks the result with the best fuzzy match against the expected value.
-    """
-    best_score, best_text = 0, ""
-    for img_url in filter(None, images):
-        res = perform_ocr_on_image(img_url, token, label)
-        score = fuzzy_match(expected, res['text'])
-        if score > best_score:
-            best_text, best_score = res['text'], score
-    logger.info(f"Best OCR match for {label}: {best_text} with score {best_score}/10")
-    return best_text, best_score
+    if kind == "chassis":
+        return 9 if re.search(r"[A-Z0-9]{2,6}[-/]?[A-Z0-9]{4,10}", text) else 6
+
+    if kind == "engine":
+        return 9 if len(text) >= 6 else 6
+
+    return 5
+
+def compare(a: str, b: str) -> dict:
+    a_n, b_n = normalize_id(a), normalize_id(b)
+
+    if not a_n or not b_n:
+        return {"match": None, "score": 0}
+
+    if a_n == b_n:
+        return {"match": True, "score": 10}
+
+    score = fuzzy_match(a_n, b_n)
+    return {"match": score >= 8, "score": score}
 
 
 def decode_vin(vin: str) -> Dict[str, Any]:
@@ -315,7 +485,7 @@ def apply_economic_life(base_price: float, reg_date: str) -> float:
     row = econ_df.iloc[idx]
     # row["DepreciationPercent"] is the percent depreciated; retention = 100 - dep%
     dep_percent = float(row["DepreciationPercent"])
-    retention_percent = max(dep_percent)
+    retention_percent = dep_percent
 
     logger.info(f"Economic Life: Age={age_years}yrs, Dep%={dep_percent}, Ret%={retention_percent}")
     return round(base_price * (retention_percent / 100.0), 2)
@@ -488,18 +658,42 @@ def calculate_imported_value(report: Dict[str, Any]) -> Optional[float]:
 def get_vehicle_data(report_id: str, token: Optional[str] = None) -> Dict[str, Any]:
     token = token or authenticate()
     report = fetch_report_data(report_id, token)
+
     if not report:
         return {}
-    
 
-    ch_urls = [report.get(k) for k in ["chassis_number_on_frame_img", "log_book_img"]]
-    en_urls = [report.get(k) for k in ["engine_img", "log_book_img"]]
+    # ================== OCR: Collect (Frame + Logbook) ==================
 
-    ch_expected = report.get("chassis_number_on_frame_img", "")
-    en_expected = report.get("engine_no", "")
+    api_chassis = report.get("chassis_no", "")
+    api_engine = report.get("engine_no", "")
 
-    ch_text, ch_conf = try_multiple_ocr_sources(ch_urls, token, ch_expected, "chassis")
-    en_text, en_conf = try_multiple_ocr_sources(en_urls, token, en_expected, "engine")
+    # --- Chassis ---
+    frame_chassis = perform_ocr_on_image(
+        report.get("f_chassis_number_on_frame_img"),
+        token,
+        label="chassis",
+        expected=api_chassis
+    )
+    logbook_chassis = perform_ocr_on_image(
+        report.get("f_log_book_img"),
+        token,
+        label="chassis",
+        expected=api_chassis
+    )
+
+    # --- Engine ---
+    frame_engine = perform_ocr_on_image(
+        report.get("engine_no_not_match_img"),
+        token,
+        label="engine",
+        expected=api_engine
+    )
+    logbook_engine = perform_ocr_on_image(
+        report.get("f_log_book_img"),
+        token,
+        label="engine",
+        expected=api_engine
+    )
 
     vin_info = decode_vin(report.get("vin", ""))
 
@@ -617,16 +811,69 @@ def get_vehicle_data(report_id: str, token: Optional[str] = None) -> Dict[str, A
                 report["retention_percent_used"] = retention_percent
                 logger.info(f"🧮 Depreciation Calculated: {depreciation_percent}% | Final Value: {estimated_value}")
 
-        
+# =============== Verification: Chassis & Engine ===============
+
+    frame_ch_text = frame_chassis["text"]
+    log_ch_text = logbook_chassis["text"]
+
+    frame_en_text = frame_engine["text"]
+    log_en_text = logbook_engine["text"]
+
+    report["chassis_verification"] = {
+        "api": api_chassis,
+        "frame_ocr": frame_ch_text,
+        "logbook_ocr": log_ch_text,
+        "frame_conf": frame_chassis["confidence"],
+        "logbook_conf": logbook_chassis["confidence"],
+        "frame_img_quality": frame_chassis.get("image_quality", 0),
+        "logbook_img_quality": logbook_chassis.get("image_quality", 0),
+        "frame_match_score": frame_chassis.get("match_score", 0),
+        "logbook_match_score": logbook_chassis.get("match_score", 0),
+        "frame_vs_api": compare(frame_ch_text, api_chassis),
+        "logbook_vs_api": compare(log_ch_text, api_chassis),
+        "frame_vs_logbook": compare(frame_ch_text, log_ch_text),
+    }
+
+    report["engine_verification"] = {
+        "api": api_engine,
+        "frame_ocr": frame_en_text,
+        "logbook_ocr": log_en_text,
+        "frame_conf": frame_engine["confidence"],
+        "logbook_conf": logbook_engine["confidence"],
+        "frame_img_quality": frame_engine.get("image_quality", 0),
+        "logbook_img_quality": logbook_engine.get("image_quality", 0),
+        "frame_match_score": frame_engine.get("match_score", 0),
+        "logbook_match_score": logbook_engine.get("match_score", 0),
+        "frame_vs_api": compare(frame_en_text, api_engine),
+        "logbook_vs_api": compare(log_en_text, api_engine),
+        "frame_vs_logbook": compare(frame_en_text, log_en_text),
+    }
+    
+    ch_text = frame_ch_text or log_ch_text
+    en_text = frame_en_text or log_en_text
+
+    # =============== OCR Summary Notes ===============
+    image_quality_notes = (
+        f"Chassis – frame imgQ: {report['chassis_verification']['frame_img_quality']}/10, "
+        f"logbook imgQ: {report['chassis_verification']['logbook_img_quality']}/10 | "
+        f"Engine – frame imgQ: {report['engine_verification']['frame_img_quality']}/10, "
+        f"logbook imgQ: {report['engine_verification']['logbook_img_quality']}/10 | /n"
+        f"Match (vs API) – chassis frame/logbook: "
+        f"{report['chassis_verification']['frame_match_score']}/10;  "
+        f"{report['chassis_verification']['logbook_match_score']}/10, "
+        f"engine frame/logbook: {report['engine_verification']['frame_match_score']}/10; "
+        f"{report['engine_verification']['logbook_match_score']}/10"
+    )
+
     return {
         "vehicle_make": report.get("make", ""),
         "vehicle_model": report.get("model", ""),
         "vin": report.get("vin", ""),
-        "chassis_number_logbook": ch_expected,
-        "engine_number_logbook": en_expected,
+        "chassis_number_logbook": api_chassis,
+        "engine_number_logbook": api_engine,
         "chassis_number_ocr": ch_text,
         "engine_number_ocr": en_text,
-        "image_quality_notes": f"Chassis confidence: {ch_conf}/10, Engine confidence: {en_conf}/10",
+        "image_quality_notes": image_quality_notes,
         "production_year": report.get("production_year", ""),
         "registration_date": report.get("registration_date", ""),       
         "origin_country": origin_country,
