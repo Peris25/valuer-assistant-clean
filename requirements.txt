@@ -9,7 +9,8 @@ pandas
 httpx
 beautifulsoup4
 numpy
-streamlit
+streamlit>=1.21
 openpyxl
 lxml
+altair==4.2.2
 
